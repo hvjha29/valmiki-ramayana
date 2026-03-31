@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+anthropic
+gTTS
+moviepy==1.0.3
+Pillow
+tqdm

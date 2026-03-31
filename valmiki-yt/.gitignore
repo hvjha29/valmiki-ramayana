@@ -1,0 +1,30 @@
+# Generated data (large, re-creatable)
+data/sargas/
+data/scripts/
+data/audio/
+data/videos/
+data/meta/
+data/index.json
+
+# Keep assets (small placeholder images)
+# !assets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
