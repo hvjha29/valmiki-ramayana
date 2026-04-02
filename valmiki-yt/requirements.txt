@@ -1,6 +1,6 @@
 requests
 beautifulsoup4
-anthropic
+huggingface_hub
 gTTS
 moviepy==1.0.3
 Pillow

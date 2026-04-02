@@ -58,10 +58,23 @@ TOTAL_SARGAS = sum(k["sarga_count"] for k in KANDAS.values())  # 534
 # Request settings
 USER_AGENT = "Mozilla/5.0 (research/personal use)"
 REQUEST_DELAY = 2  # seconds between HTTP requests
-API_DELAY = 1  # seconds between Claude API calls
 
-# Claude model
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+# ── Hugging Face Inference API ─────────────────────────────────────────────
+HF_MODEL_PRIMARY = "Qwen/Qwen2.5-72B-Instruct"
+HF_MODEL_FALLBACKS = [
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+    "HuggingFaceH4/zephyr-7b-beta",
+]
+HF_MAX_NEW_TOKENS = 2048
+HF_TEMPERATURE = 0.7
+HF_TOP_P = 0.9
+HF_REQUEST_DELAY = 2.0  # seconds between HF API calls (free-tier rate limits)
+
+# Input truncation: keeps requests small for free-tier rate limits.
+# Even though Qwen2.5-72B has 128K context, smaller inputs = faster + cheaper.
+# 5500 chars ≈ 1500 tokens input, leaving ample room for output.
+HF_MAX_INPUT_CHARS = 5500
 
 # Video settings
 VIDEO_WIDTH = 1080
@@ -75,6 +88,39 @@ SCRIPT_MAX_WORDS = 1200
 # TTS settings
 TTS_LANG = "en"
 TTS_SLOW = False
+
+# ── Per-kanda expected names (for script quality / hallucination check) ────
+# If fewer than 3 of these appear in a generated script, flag low_confidence.
+KANDA_EXPECTED_NAMES = {
+    "baala": [
+        "Rama", "Vishwamitra", "Dasharatha", "Valmiki", "Sita",
+        "Lakshmana", "Kausalya", "Tataka", "Maricha", "Janaka",
+        "Bharata", "Shatrughna", "Narada", "Ayodhya",
+    ],
+    "ayodhya": [
+        "Rama", "Sita", "Lakshmana", "Dasharatha", "Kaikeyi",
+        "Bharata", "Kausalya", "Sumitra", "Guha", "Ayodhya",
+        "Chitrakuta", "Manthara", "Sumantra",
+    ],
+    "aranya": [
+        "Rama", "Sita", "Lakshmana", "Ravana", "Surpanakha",
+        "Jatayu", "Maricha", "Agastya", "Khara", "Panchavati",
+        "Dandaka",
+    ],
+    "kish": [
+        "Rama", "Sugriva", "Hanuman", "Vali", "Lakshmana",
+        "Tara", "Angada", "Kishkindha", "Rishyamuka", "Sita",
+    ],
+    "sundara": [
+        "Hanuman", "Sita", "Rama", "Ravana", "Lanka",
+        "Lakshmana", "Trijata", "Indrajit", "Ashoka",
+    ],
+    "yuddha": [
+        "Rama", "Ravana", "Lakshmana", "Hanuman", "Sita",
+        "Vibhishana", "Indrajit", "Kumbhakarna", "Sugriva",
+        "Lanka", "Angada", "Mandodari",
+    ],
+}
 
 
 def sarga_url(kanda_key: str, sarga_num: int) -> str:

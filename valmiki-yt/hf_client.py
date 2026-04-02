@@ -21,11 +21,10 @@ import config
 # ── Model alias map (short name → full HF model ID) ─────────────────────────
 
 MODEL_ALIASES = {
-    "mistral": config.HF_MODEL_PRIMARY,
+    "qwen": config.HF_MODEL_PRIMARY,
+    "llama": "meta-llama/Llama-3.1-8B-Instruct",
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
     "zephyr": "HuggingFaceH4/zephyr-7b-beta",
-    "phi": "microsoft/Phi-3-mini-4k-instruct",
-    "gemma": "google/gemma-2-2b-it",
-    "falcon": "tiiuae/falcon-7b-instruct",
 }
 
 
@@ -41,7 +40,7 @@ class HFClient:
     Pass pinned_model= to skip the fallback chain entirely.
     """
 
-    REST_URL = "https://api-inference.huggingface.co/models/{model}"
+    REST_URL = "https://router.huggingface.co/models/{model}"
 
     def __init__(self, token: Optional[str] = None, pinned_model: Optional[str] = None):
         self.token = token or os.environ.get("HF_TOKEN", "")
@@ -103,7 +102,7 @@ class HFClient:
 
     # ── Hub client call ──────────────────────────────────────────────────
 
-    def _call_hub(self, model: str, system: str, user: str) -> Optional[str]:
+    def _call_hub(self, model: str, system: str, user: str, min_length: int = 50) -> Optional[str]:
         if not self._hf_client:
             return None
         try:
@@ -117,7 +116,7 @@ class HFClient:
                 top_p=config.HF_TOP_P,
             )
             text = resp.choices[0].message.content
-            if text and len(text.strip()) > 50:
+            if text and len(text.strip()) > min_length:
                 return text.strip()
         except Exception as e:
             err = str(e).lower()
@@ -135,7 +134,7 @@ class HFClient:
 
     # ── REST fallback ────────────────────────────────────────────────────
 
-    def _call_rest(self, model: str, system: str, user: str) -> Optional[str]:
+    def _call_rest(self, model: str, system: str, user: str, min_length: int = 50) -> Optional[str]:
         url = self.REST_URL.format(model=model)
         headers = {"Authorization": f"Bearer {self.token}"}
         prompt = self._raw_prompt(system, user, model)
@@ -186,7 +185,7 @@ class HFClient:
             # Strip prompt prefix
             if gen.startswith(prompt):
                 gen = gen[len(prompt):]
-            return gen.strip() if len(gen.strip()) > 50 else None
+            return gen.strip() if len(gen.strip()) > min_length else None
 
         except req_lib.exceptions.Timeout:
             print(f"    ✗ {model} timed out")
@@ -197,19 +196,19 @@ class HFClient:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def generate(self, system_prompt: str, user_prompt: str) -> Optional[str]:
+    def generate(self, system_prompt: str, user_prompt: str, min_length: int = 50) -> Optional[str]:
         """Generate text. Tries each model in order until one succeeds."""
         for model in self.models:
             print(f"  🤖 Trying {model}...")
 
             # Hub client first
-            result = self._call_hub(model, system_prompt, user_prompt)
+            result = self._call_hub(model, system_prompt, user_prompt, min_length=min_length)
             if result:
                 self._active_model = model
                 return result
 
             # REST fallback
-            result = self._call_rest(model, system_prompt, user_prompt)
+            result = self._call_rest(model, system_prompt, user_prompt, min_length=min_length)
             if result:
                 self._active_model = model
                 return result
@@ -230,6 +229,7 @@ class HFClient:
         result = self.generate(
             "You are a helpful assistant. Respond briefly.",
             "Say exactly: 'Connection successful.'",
+            min_length=5,  # short response expected for health check
         )
         if result:
             print(f"\n  ✓ Connected via {self._active_model}")

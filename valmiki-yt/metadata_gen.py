@@ -1,16 +1,20 @@
 """
-Phase 5: YouTube metadata generation using Claude API.
+Phase 5: YouTube metadata generation using Hugging Face Inference API.
 
 Generates title, description, tags, category, and playlist for each video.
+Includes deterministic fallback templates when model fails to return valid JSON.
 """
+from __future__ import annotations
 
-import os
+import json
 import sys
+from typing import Optional
 
 import config
+from hf_client import HFClient
 from utils import (
     log_ok, log_skip, log_err, log_header,
-    rate_limit, read_json, write_json, read_text,
+    read_json, write_json, read_text,
     sarga_path, script_path, meta_path,
     load_index,
 )
@@ -29,32 +33,70 @@ METADATA_SYSTEM_PROMPT = (
     "the kanda name, sarga number, and topical tags\n"
     '  "yt_category": "Education"\n'
     '  "playlist": the kanda name\n'
-    "Return ONLY valid JSON, no markdown fences."
+    "Return ONLY valid JSON, no markdown fences, no explanation."
 )
 
 
-def _get_client():
-    """Lazily create Anthropic client."""
+def _parse_json_response(text: str) -> Optional[dict]:
+    """Try to extract valid JSON from the model's response."""
+    # Strip markdown fences
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+
+    # Direct parse
     try:
-        import anthropic
-    except ImportError:
-        print("ERROR: 'anthropic' package not installed. Run: pip install anthropic")
-        sys.exit(1)
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY environment variable not set.")
-        sys.exit(1)
+    # Find JSON object in the text
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
 
-    return anthropic.Anthropic(api_key=api_key)
+    return None
 
 
-def generate_metadata(sid: str, sarga_data: dict, script_text: str, client) -> dict:
-    """Call Claude to generate YouTube metadata."""
-    import json
+def _fallback_metadata(sarga_data: dict) -> dict:
+    """Deterministic metadata template when model fails to return valid JSON."""
+    kanda = sarga_data.get("kanda", "Unknown Kanda")
+    sarga = sarga_data.get("sarga_number", 0)
+    summary = sarga_data.get("summary", "")
 
-    rate_limit("claude", config.API_DELAY)
+    subtitle = ""
+    if summary:
+        first_sentence = summary.split(".")[0].strip()
+        if len(first_sentence) > 10:
+            subtitle = f" | {first_sentence[:60]}"
 
+    return {
+        "yt_title": f"Valmiki Ramayana | {kanda} | Sarga {sarga}{subtitle}",
+        "yt_description": (
+            f"{kanda}, Sarga {sarga}. {summary[:200] if summary else ''} "
+            f"This is from the unabridged Valmiki Ramayana, translated by "
+            f"Desiraju Hanumanta Rao. Subscribe for daily episodes."
+        ),
+        "yt_tags": [
+            "Valmiki Ramayana", kanda, f"Sarga {sarga}",
+            "Hindu epic", "Rama", "Sanskrit epic English",
+            "Ramayana narration", "Indian mythology",
+            "Vedic literature", "Ramayana audiobook",
+            "Hindu scripture", "Ancient Indian epic",
+        ],
+        "yt_category": "Education",
+        "playlist": kanda,
+        "_generated_by": "fallback_template",
+    }
+
+
+def generate_metadata(sid: str, sarga_data: dict, script_text: str, client: HFClient) -> dict:
+    """Generate YouTube metadata for one video."""
     user_msg = (
         f"Video ID: {sid}\n"
         f"Kanda: {sarga_data.get('kanda', '')}\n"
@@ -64,31 +106,28 @@ def generate_metadata(sid: str, sarga_data: dict, script_text: str, client) -> d
         "Generate the YouTube metadata JSON."
     )
 
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1024,
-        system=METADATA_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}],
-    )
+    result = client.generate(METADATA_SYSTEM_PROMPT, user_msg)
 
-    raw = response.content[0].text.strip()
+    if result:
+        meta = _parse_json_response(result)
+        if meta:
+            meta["video_id"] = sid
+            return meta
 
-    # Try to parse JSON, handle markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-
-    meta = json.loads(raw)
+    # Fallback to deterministic template
+    log_err(f"{sid} → model response wasn't valid JSON, using fallback template")
+    meta = _fallback_metadata(sarga_data)
     meta["video_id"] = sid
     return meta
 
 
-def run_metadata():
+def run_metadata(
+    kanda_filter: Optional[str] = None,
+    pinned_model: Optional[str] = None,
+):
     """Generate metadata for all available scripts."""
-    log_header("PHASE 5: Metadata Generation")
-    index = load_index()
-    client = _get_client()
+    log_header("PHASE 5: Metadata Generation (Hugging Face)")
+    client = HFClient(pinned_model=pinned_model)
 
     from tqdm import tqdm
     from pathlib import Path
@@ -101,12 +140,19 @@ def run_metadata():
         print("  No scripts found. Run --scripts first.")
         return
 
+    stats = {"ok": 0, "fallback": 0, "skipped": 0, "error": 0}
+
     for sf in tqdm(script_files, desc="Generating metadata"):
         sid = sf.stem.replace("_script", "")
-        out = meta_path(sid)
 
+        # Apply kanda filter
+        if kanda_filter and not sid.startswith(kanda_filter):
+            continue
+
+        out = meta_path(sid)
         if out.exists():
             log_skip(f"{sid} metadata exists")
+            stats["skipped"] += 1
             continue
 
         # Load sarga data
@@ -114,22 +160,34 @@ def run_metadata():
         if sp.exists():
             sarga_data = read_json(sp)
         else:
-            # For combined/split IDs, try the base sarga
             base_sid = "_".join(sid.split("_")[:2])
             sp = sarga_path(base_sid)
-            if sp.exists():
-                sarga_data = read_json(sp)
-            else:
-                sarga_data = {"kanda": "", "sarga_number": 0, "summary": ""}
+            sarga_data = read_json(sp) if sp.exists() else {"kanda": "", "sarga_number": 0, "summary": ""}
 
         script_text = read_text(sf)
 
         try:
             meta = generate_metadata(sid, sarga_data, script_text, client)
             write_json(out, meta)
-            log_ok(f"{sid} → {meta.get('yt_title', '')[:60]}...")
+
+            if meta.get("_generated_by") == "fallback_template":
+                log_ok(f"{sid} → fallback template")
+                stats["fallback"] += 1
+            else:
+                log_ok(f"{sid} → {meta.get('yt_title', '')[:60]}...")
+                stats["ok"] += 1
         except Exception as e:
             log_err(f"{sid} → {e}")
+            stats["error"] += 1
+
+    print(f"\n{'─'*60}")
+    print(
+        f"  Metadata: ✓ {stats['ok']} ok | "
+        f"📋 {stats['fallback']} fallback | "
+        f"⚠ {stats['skipped']} skipped | "
+        f"✗ {stats['error']} errors"
+    )
+    print(f"{'─'*60}\n")
 
 
 if __name__ == "__main__":
